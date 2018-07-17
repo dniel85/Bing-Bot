@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<configuration>
+    <general
+        betweenQueriesInterval="15.0"
+        betweenQueriesSalt="12.0"
+        betweenAccountsInterval="300"
+        betweenAccountsSalt="600"
+        openTopLinkRange="5"
+        openLinkChance=".7"
+        addSearchesDesktop="0"
+        addSearchesDesktopSalt="20"
+        addSearchesMobile="0"
+        addSearchesMobileSalt="20" />
+    <accounts>
+		<account>
+			<login>darrell.nielsen@outlook.com</login>
+			<password>zxasqw12ZXASQW!@</password>
+			<ua_desktop><![CDATA[Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; Touch; rv:11.0) like Gecko]]></ua_desktop>
+			<!-- <ua_mobile><![CDATA[]]></ua_mobile> -->
+		</account>   
+    </accounts>
+    <queries generator="wikipedia" />
+</configuration>

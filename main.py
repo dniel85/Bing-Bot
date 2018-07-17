@@ -13,30 +13,33 @@ import random
 import sys
 import time
 import urllib2
+import traceback
 
 from socket import error as SocketError
 import errno
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "pkg"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "pkg", "queryGenerators"))
+
+file = os.path.realpath(__file__)
+sys.path.append(os.path.join(os.path.dirname(file), "pkg"))
+sys.path.append(os.path.join(os.path.dirname(file), "pkg", "queryGenerators"))
 
 from bingAuth import BingAuth, AuthenticationError
 from bingRewards import BingRewards
 from config import BingRewardsReportItem, Config, ConfigError
 from eventsProcessor import EventsProcessor
 import bingCommon
-import bingFlyoutParser as bfp
+import bingDashboardParser as bdp
 import helpers
 from helpers import BingAccountError
 
 verbose = False
 totalPoints = 0
 
-SCRIPT_VERSION = "3.15.1"
-SCRIPT_DATE = "September 13, 2017"
+SCRIPT_VERSION = "3.16.2"
+SCRIPT_DATE = "June 1, 2018"
 
 def earnRewards(config, httpHeaders, userAgents, reportItem, password):
-    """Earns Bing! reward points and populates reportItem"""
+    """Earns Bing reward points and populates reportItem"""
     noException = False
     try:
         if reportItem is None: raise ValueError("reportItem is None")
@@ -52,7 +55,7 @@ def earnRewards(config, httpHeaders, userAgents, reportItem, password):
         bingAuth    = BingAuth(httpHeaders, bingRewards.opener)
         bingAuth.authenticate(reportItem.accountType, reportItem.accountLogin, password)
         reportItem.oldPoints = bingRewards.getRewardsPoints()
-        rewards = bfp.parseFlyoutPage(bingRewards.requestFlyoutPage(), bingCommon.BING_URL)
+        rewards = bdp.parseDashboardPage(bingRewards.getDashboardPage(), bingCommon.ACCOUNT_URL)
 
         if verbose:
             bingRewards.printRewards(rewards)
@@ -61,7 +64,7 @@ def earnRewards(config, httpHeaders, userAgents, reportItem, password):
 
         if verbose:
             print
-            print "-" * 80
+            print ("-" * 80)
             print
 
         bingRewards.printResults(results, verbose)
@@ -71,7 +74,7 @@ def earnRewards(config, httpHeaders, userAgents, reportItem, password):
         reportItem.pointsEarned = reportItem.newPoints - reportItem.oldPoints
         reportItem.pointsEarnedRetrying += reportItem.pointsEarned
         print
-        print "%s - %s" % (reportItem.accountType, reportItem.accountLogin)
+        print ("%s - %s" % (reportItem.accountType, reportItem.accountLogin))
         print
         print "Points before:    %6d" % reportItem.oldPoints
         print "Points after:     %6d" % reportItem.newPoints
@@ -82,6 +85,14 @@ def earnRewards(config, httpHeaders, userAgents, reportItem, password):
         print "-" * 80
 
         noException = True
+
+    except IOError, e:
+        reportItem.error = e
+        print "IOError: %s" % e
+
+    except ValueError, e:
+        reportItem.error = e
+        print "ValueError: %s" % e
 
     except AuthenticationError, e:
         reportItem.error = e
@@ -137,7 +148,7 @@ def usage():
     print "        --version            print version info"
 
 def printVersion():
-    print "Bing! Rewards Automation script: <http://sealemar.blogspot.com/2012/12/bing-rewards-automation.html>"
+    print "Bing Rewards Automation script: <http://sealemar.blogspot.com/2012/12/bing-rewards-automation.html>"
     print "Version: " + SCRIPT_VERSION + " from " + SCRIPT_DATE
     print "See 'version.txt' for the list of changes"
     print "This code is published under LGPL v3 <http://www.gnu.org/licenses/lgpl-3.0.html>"
@@ -182,7 +193,9 @@ def __run(config):
 
     doSleep = False
 
-    for key, account in config.accounts.iteritems():
+    accounts = config.accounts.items()
+    random.shuffle(accounts)
+    for key, account in accounts:
         if account.disabled:
             continue
 
@@ -241,13 +254,16 @@ if __name__ == "__main__":
         usage()
         sys.exit(1)
 
-    configFile = os.path.join(os.path.dirname(__file__), "config.xml")
+    configFile = ""
+    configFileName = None
+  
     showFullReport = False
     for o, a in opts:
         if o in ("-h", "--help"):
             usage()
             sys.exit()
         elif o in ("-f", "--configFile"):
+            configFileName = a
             configFile = a
         elif o in ("-r", "--full-report"):
             showFullReport = True
@@ -258,6 +274,16 @@ if __name__ == "__main__":
             sys.exit()
         else:
             raise NotImplementedError("option '" + o + "' is not implemented")
+
+    #if no config file was specified as an option use the default 
+    if configFileName is None : 
+        configFileName = "config.xml"
+    
+    #if the file doesn't exist, look for it relative to the working and current dirs
+    if not os.path.isfile(configFile):
+        configFile = os.path.join(os.path.dirname(os.path.realpath(__file__)), configFileName)
+        if not os.path.isfile(configFile):
+            configFile = os.path.join(os.getcwd(), configFileName)
 
     print "%s - script started" % helpers.getLoggingTime()
     print "-" * 80
@@ -279,4 +305,6 @@ if __name__ == "__main__":
     try:
         __run(config)
     except BaseException, e:
+        if verbose:
+            traceback.print_exc()
         EventsProcessor.onScriptFailure(config, e)

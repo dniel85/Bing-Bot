@@ -15,7 +15,7 @@ import importlib
 import re
 
 import bingCommon
-import bingFlyoutParser as bfp
+import bingDashboardParser as bdp
 import bingHistory
 import helpers
 
@@ -37,16 +37,14 @@ class HTTPRefererHandler(urllib2.HTTPRedirectHandler):
 class BingRewards:
     class RewardResult:
         def __init__(self, reward):
-            if reward is None or not isinstance(reward, bfp.Reward):
+            if reward is None or not isinstance(reward, bdp.Reward):
                 raise TypeError("reward is not of Reward type")
 
             self.o = reward
             self.isError = False
             self.message = ""
 # action applied to the reward
-            self.action  = bfp.Reward.Type.Action.WARN
-
-    BING_FLYOUT_PAGE = "http://www.bing.com/rewardsapp/flyoutpage?style=v2"
+            self.action  = bdp.Reward.Type.Action.WARN
 
     def __init__(self, httpHeaders, userAgents, config):
         """
@@ -68,7 +66,7 @@ class BingRewards:
         self.userAgents  = userAgents
         self.queryGenerator = config.queryGenerator
 
-        cookies = cookielib.CookieJar()
+        self.cookies = cookielib.CookieJar()
 
         if config.proxy:
             if config.proxy.login:
@@ -84,7 +82,7 @@ class BingRewards:
                                             #urllib2.HTTPHandler(debuglevel = 1),      # be verbose on HTTP
                                             urllib2.HTTPSHandler(),
                                             HTTPRefererHandler,                       # add Referer header on redirect
-                                            urllib2.HTTPCookieProcessor(cookies))     # keep cookies
+                                            urllib2.HTTPCookieProcessor(self.cookies))     # keep cookies
 
         else:
             self.opener = urllib2.build_opener(
@@ -92,37 +90,41 @@ class BingRewards:
                                             #urllib2.HTTPHandler(debuglevel = 1),      # be verbose on HTTP
                                             urllib2.HTTPSHandler(),
                                             HTTPRefererHandler,                       # add Referer header on redirect
-                                            urllib2.HTTPCookieProcessor(cookies))     # keep cookies
-
-    def requestFlyoutPage(self):
-        """
-        Returns bing.com flyout page
-        This page shows what rewarding activity can be performed in
-        order to earn Bing points
-        """
-        url = self.BING_FLYOUT_PAGE
-        request = urllib2.Request(url = url, headers = self.httpHeaders)
-
-# commenting the line below, because on 10/25/2013 Bing! started to return an empty flyout page if referer is other than http://www.bing.com
-        #request.add_header("Referer", "http://www.bing.com/rewards/dashboard")
-
-        with self.opener.open(request) as response:
-            page = helpers.getResponseBody(response)
-        return page
+                                            urllib2.HTTPCookieProcessor(self.cookies))     # keep cookies
 
     def getLifetimeCredits(self):
+        page = self.getDashboardPage()
+        #Figure out which version of the rewards page we're on
+        if page.find("rewards-oneuidashboard") != -1:
+            block = page.split("var dashboard")[1]
+            return int(block[block.index('"lifetimePoints"'):].split(',')[0].split(':')[1])
+        else:
+        # find lifetime points
+            s = page.find(' lifetime points</div>') - 20
+            s = page.find('>', s) + 1
+            e = page.find(' ', s)
+            points = page[s:e]
+            return int(points.replace(",", "")) # remove commas so we can cast as int
+        #should never happen...
+        return 0
+
+    def getDashboardPage(self):
         """
         Returns https://account.microsoft.com/rewards Lifetime Credits
         The number of credits earned since day one of the account
         """
-        url = "https://account.microsoft.com/rewards"
+        url = "https://account.microsoft.com/rewards/dashboard"
         request = urllib2.Request(url = url, headers = self.httpHeaders)
         request.add_header("Referer", bingCommon.BING_URL)
         with self.opener.open(request) as response:
             referer = response.geturl()
             page = helpers.getResponseBody(response)
 
-# get form data
+        #If we have already gone through the sign in process once, we don't need to do it again, just return the page
+        if page.find('JavaScript required to sign in') == -1:
+            return page
+
+        # get form data
         s = page.index('action="')
         s += len('action="')
         e = page.index('"', s)
@@ -146,24 +148,24 @@ class BingRewards:
         e = page.index('"', s)
         t = page[s:e]
 
+        s = page.index('id="pprid"')
+        s = page.index('value="', s)
+        s += len('value="')
+        e = page.index('"', s)
+        pprid = page[s:e] 
+
         postFields = urllib.urlencode({
             "NAP"    : nap,
             "ANON"   : anon,
-            "t"      : t
+            "t"      : t,
+            "pprid"  : pprid
         })
 
         request = urllib2.Request(action, postFields, self.httpHeaders)
         request.add_header("Referer", referer)
         with self.opener.open(request) as response:
             page = helpers.getResponseBody(response)
-
-# find lifetime points
-        s = page.find(' lifetime points</div>') - 20
-        s = page.find('>', s) + 1
-        e = page.find(' ', s)
-        points = page[s:e]
-
-        return int(points.replace(",", "")) # remove commas so we can cast as int
+        return page 
 
     def getRewardsPoints(self):
         """
@@ -184,8 +186,8 @@ class BingRewards:
         helpers.errorOnText(page, "You are not signed", "Temporary account ban: User was not successfully signed in.\n")
 
 # parse activity page
-        s = page.index("t.innerHTML='")
-        s += len("t.innerHTML='")
+        s = page.index("var b='")
+        s += len("var b='")
         e = page.index("'", s)
         rewardsText = page[s:e]
         if rewardsText == 'Rewards': # The account is banned
@@ -194,19 +196,34 @@ class BingRewards:
             return int(rewardsText)
 
     def __processHit(self, reward):
-        """Processes bfp.Reward.Type.Action.HIT and returns self.RewardResult"""
+        """Processes bdp.Reward.Type.Action.HIT and returns self.RewardResult"""
         res = self.RewardResult(reward)
         pointsEarned = self.getRewardsPoints()
-        request = urllib2.Request(url = reward.url, headers = self.httpHeaders)
-        with self.opener.open(request) as response:
+        currPage = self.getDashboardPage()
+        startIndex = currPage.find('__RequestVerificationToken')
+        endIndex = currPage[startIndex:].find('/>')
+        #pad here to get to the correct spot
+        verificationAttr = currPage[startIndex+49:startIndex+endIndex-2]
+
+        verificationData = [
+            ('id', reward.hitId),
+            ('hash', reward.hitHash),
+            ('timeZone', '-300'),
+            ('activityAmount', '1'),
+            ('__RequestVerificationToken', verificationAttr) #there was a comma here, removed it. Monitor to make sure shit still works
+        ]
+
+        verificationUrl = 'https://account.microsoft.com/rewards/api/reportactivity?refd=www.bing.com&X-Requested-With=XMLHttpRequest'
+
+        request = urllib2.Request(url = verificationUrl, headers = self.httpHeaders)
+        with self.opener.open(request, urllib.urlencode(verificationData)) as response:
             page = helpers.getResponseBody(response)
         pointsEarned = self.getRewardsPoints() - pointsEarned
-# if HIT is against bfp.Reward.Type.RE_EARN_CREDITS - check if pointsEarned is the same to
-# pointsExpected
-        indCol = bfp.Reward.Type.Col.INDEX
-        if reward.tp[indCol] == bfp.Reward.Type.RE_EARN_CREDITS[indCol]:
-            matches = bfp.Reward.Type.RE_EARN_CREDITS[bfp.Reward.Type.Col.NAME].search(reward.name)
-            pointsExpected = int(matches.group(1))
+        # if HIT is against bdp.Reward.Type.RE_EARN_CREDITS - check if pointsEarned is the same to
+        # pointsExpected
+        indCol = bdp.Reward.Type.Col.INDEX
+        if reward.tp[indCol] == bdp.Reward.Type.RE_EARN_CREDITS[indCol]:
+            pointsExpected = reward.progressMax - reward.progressCurrent
             if pointsExpected != pointsEarned:
                 filename = helpers.dumpErrorPage(page)
                 res.isError = True
@@ -215,7 +232,7 @@ class BingRewards:
         return res
 
     def __processWarn(self, reward):
-        """Processes bfp.Reward.Type.Action.WARN and returns self.RewardResult"""
+        """Processes bdp.Reward.Type.Action.WARN and returns self.RewardResult"""
         res = self.RewardResult(reward)
 
         if reward.isAchieved():
@@ -234,7 +251,7 @@ class BingRewards:
         return res
 
     def __processSearch(self, reward, verbose):
-        """Processes bfp.Reward.Type.Action.SEARCH and returns self.RewardResult"""
+        """Processes bdp.Reward.Type.Action.SEARCH and returns self.RewardResult"""
 
         BING_QUERY_URL = 'http://www.bing.com/search?q='
         BING_QUERY_SUCCESSFULL_RESULT_MARKER_PC = '<div id="b_content">'
@@ -248,9 +265,9 @@ class BingRewards:
             res.message = "This reward has been already achieved"
             return res
 
-        indCol = bfp.Reward.Type.Col.INDEX
+        indCol = bdp.Reward.Type.Col.INDEX
 
-# get a set of queries from today's Bing! history
+# get a set of queries from today's Bing history
         url = bingHistory.getBingHistoryTodayURL()
         request = urllib2.Request(url = url, headers = self.httpHeaders)
         with self.opener.open(request) as response:
@@ -258,8 +275,13 @@ class BingRewards:
         history = bingHistory.parse(page)
 
 # find out how many searches need to be performed
-        matches = bfp.Reward.Type.SEARCH_AND_EARN_DESCR_RE.search(reward.description)
+        matchesMobile = False
+        matches = bdp.Reward.Type.SEARCH_AND_EARN_DESCR_RE.search(reward.description)
+        #Mobile description changed, so check that one too
         if matches is None:
+            matches = bdp.Reward.Type.SEARCH_AND_EARN_DESCR_RE_MOBILE.search(reward.description)
+            matchesMobile = True
+        if matches is None: 
             print "No RegEx matches found for this search and earn"
             res.isError = True
             res.message = "No RegEx matches found for this search and earn"
@@ -274,15 +296,28 @@ class BingRewards:
 # so divide it by points per search (rewardsCount) to get correct search count needed
         searchesCount -= (reward.progressCurrent * rewardCost) / rewardsCount
 
+        if matchesMobile == True:
+            #new mobile search description gives total search count + points per search for edge/non-edge
+            edgeValue = int(matches.group(1))
+            nonEdgeValue = int(matches.group(2))
+            searchesCount = int(matches.group(3))
+            #apparently ios uses EdgiOS, so we only check the first 3 letters not the full word 'edge'
+            if self.userAgents.mobile.lower().find("edg") != -1:
+                #we are searching on edge so points go to 200
+                searchesCount -= reward.progressCurrent / edgeValue
+            else:
+                #non-edge search so 100 is the max
+                searchesCount -= reward.progressCurrent / nonEdgeValue
+
         headers = self.httpHeaders
 
-        if reward.tp == bfp.Reward.Type.SEARCH_PC or reward.tp == bfp.Reward.Type.SEARCH_AND_EARN:
+        if reward.tp == bdp.Reward.Type.SEARCH_PC or reward.tp == bdp.Reward.Type.SEARCH_AND_EARN:
             headers["User-Agent"] = self.userAgents.pc
             searchesCount += self.addSearchesDesktop + random.randint(0, self.addSearchesDesktopSalt)
             print
             print "Running PC searches"
             print
-        elif reward.tp == bfp.Reward.Type.SEARCH_MOBILE:
+        elif reward.tp == bdp.Reward.Type.SEARCH_MOBILE:
             headers["User-Agent"] = self.userAgents.mobile
             searchesCount += self.addSearchesMobile + random.randint(0, self.addSearchesMobileSalt)
             print
@@ -318,7 +353,7 @@ class BingRewards:
 
         for query in queries:
             if i > 1:
-# sleep some time between queries (don't worry Bing! ;) )
+# sleep some time between queries (don't worry Bing ;) )
                 t = self.betweenQueriesInterval + random.uniform(0, self.betweenQueriesSalt)
                 time.sleep(t)
 
@@ -407,15 +442,15 @@ class BingRewards:
 
         for r in rewards:
             if r.tp is None:
-                action = bfp.Reward.Type.Action.WARN
+                action = bdp.Reward.Type.Action.WARN
             else:
-                action = r.tp[bfp.Reward.Type.Col.ACTION]
+                action = r.tp[bdp.Reward.Type.Col.ACTION]
 
-            if action == bfp.Reward.Type.Action.HIT:
+            if action == bdp.Reward.Type.Action.HIT:
                 res = self.__processHit(r)
-            elif action == bfp.Reward.Type.Action.WARN:
+            elif action == bdp.Reward.Type.Action.WARN:
                 res = self.__processWarn(r)
-            elif action == bfp.Reward.Type.Action.SEARCH:
+            elif action == bdp.Reward.Type.Action.SEARCH:
                 res = self.__processSearch(r, verbose)
             else:
                 res = self.RewardResult(r)
@@ -437,6 +472,8 @@ class BingRewards:
         if reward.isDone:
             print "is done     : true"
         print "description : %s" % reward.description
+        print "hit identifier: %s" % reward.hitId
+        print "hit hash: %s" % reward.hitHash
 
     def printRewards(self, rewards):
         """
@@ -461,7 +498,7 @@ class BingRewards:
         if result.isError:
             print "   Error    :   true"
         print "   Message  : " + result.message
-        print "   Action   : " + bfp.Reward.Type.Action.toStr(result.action)
+        print "   Action   : " + bdp.Reward.Type.Action.toStr(result.action)
 
 
     def printResults(self, results, verbose):
